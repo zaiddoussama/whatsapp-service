@@ -135,7 +135,10 @@ class WhatsAppClient {
             // Format phone number (must include country code)
             const chatId = to.includes('@c.us') ? to : `${to}@c.us`;
 
-            const sentMessage = await this.client.sendMessage(chatId, message);
+            // sendSeen: false fixes "markedUnread" error in newer WhatsApp Web versions
+            const sentMessage = await this.client.sendMessage(chatId, message, {
+                sendSeen: false
+            });
 
             return {
                 success: true,
@@ -167,7 +170,8 @@ class WhatsAppClient {
             );
 
             const sentMessage = await this.client.sendMessage(chatId, media, {
-                caption: caption
+                caption: caption,
+                sendSeen: false
             });
 
             return {
@@ -199,12 +203,15 @@ class WhatsAppClient {
     }
 
     async markAsRead(messageId) {
+        // Note: sendSeen is currently broken in newer WhatsApp Web versions
+        // Skipping this functionality until whatsapp-web.js fixes it
         try {
-            const message = await this.client.getMessageById(messageId);
-            if (message) {
-                const chat = await message.getChat();
-                await chat.sendSeen();
-            }
+            console.log(`markAsRead called for ${messageId} - skipped due to WhatsApp Web API changes`);
+            // const message = await this.client.getMessageById(messageId);
+            // if (message) {
+            //     const chat = await message.getChat();
+            //     await chat.sendSeen();
+            // }
         } catch (error) {
             console.error('Error marking as read:', error);
         }
