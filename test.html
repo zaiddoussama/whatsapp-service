@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WhatsApp Web.js Tester</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #25D366;
+        }
+        .step {
+            background: #f9f9f9;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+            border-left: 4px solid #25D366;
+        }
+        button {
+            background: #25D366;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background: #128C7E;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        #qrcode {
+            margin: 20px 0;
+            text-align: center;
+        }
+        #qrcode img {
+            max-width: 300px;
+            border: 3px solid #25D366;
+            padding: 10px;
+            background: white;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        input {
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            width: 200px;
+        }
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔗 WhatsApp Web.js Connection Tool</h1>
+
+        <div class="step">
+            <h3>Step 1: Initialize WhatsApp</h3>
+            <label>User ID: <input type="number" id="userId" value="1" /></label>
+            <button onclick="initWhatsApp()">🚀 Initialize WhatsApp</button>
+            <div id="initStatus"></div>
+        </div>
+
+        <div class="step">
+            <h3>Step 2: Get QR Code</h3>
+            <button onclick="getQRCode()" id="qrBtn" disabled>📱 Get QR Code</button>
+            <button onclick="checkStatus()">🔄 Check Status</button>
+            <div id="qrStatus"></div>
+            <div id="qrcode"></div>
+        </div>
+
+        <div class="step">
+            <h3>Step 3: Send Test Message</h3>
+            <label>Phone: <input type="text" id="phone" placeholder="212645923046" /></label><br><br>
+            <label>Message: <input type="text" id="message" placeholder="Hello!" style="width: 300px;" /></label><br><br>
+            <button onclick="sendMessage()" id="sendBtn" disabled>📤 Send Message</button>
+            <div id="sendStatus"></div>
+        </div>
+
+        <div class="step">
+            <h3>📊 Current Status</h3>
+            <div id="statusInfo"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:3000/api';
+        const API_KEY = 'whatsapp-service-secret-key-123';
+
+        async function apiCall(endpoint, method = 'GET', body = null) {
+            const options = {
+                method: method,
+                headers: {
+                    'X-API-Key': API_KEY,
+                    'Content-Type': 'application/json'
+                }
+            };
+
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
+
+            try {
+                const response = await fetch(`${API_URL}${endpoint}`, options);
+                const data = await response.json();
+                return { ok: response.ok, data };
+            } catch (error) {
+                return { ok: false, error: error.message };
+            }
+        }
+
+        async function initWhatsApp() {
+            const userId = document.getElementById('userId').value;
+            const statusDiv = document.getElementById('initStatus');
+
+            statusDiv.innerHTML = '<div class="status info">⏳ Initializing WhatsApp...</div>';
+
+            const result = await apiCall('/init', 'POST', { userId: parseInt(userId) });
+
+            if (result.ok) {
+                statusDiv.innerHTML = '<div class="status success">✅ ' + result.data.message + '</div>';
+                document.getElementById('qrBtn').disabled = false;
+                setTimeout(getQRCode, 2000); // Auto-fetch QR after 2 seconds
+            } else {
+                statusDiv.innerHTML = '<div class="status error">❌ Error: ' + (result.data?.error || result.error) + '</div>';
+            }
+        }
+
+        async function getQRCode() {
+            const userId = document.getElementById('userId').value;
+            const qrDiv = document.getElementById('qrcode');
+            const statusDiv = document.getElementById('qrStatus');
+
+            statusDiv.innerHTML = '<div class="status info">⏳ Fetching QR code...</div>';
+
+            const result = await apiCall(`/qr/${userId}`);
+
+            if (result.ok && result.data.qrCode) {
+                if (result.data.status === 'connected') {
+                    statusDiv.innerHTML = '<div class="status success">✅ Already connected!</div>';
+                    qrDiv.innerHTML = '';
+                    document.getElementById('sendBtn').disabled = false;
+                } else {
+                    // Generate QR code image
+                    const qrImage = await generateQRImage(result.data.qrCode);
+                    qrDiv.innerHTML = '<img src="' + qrImage + '" alt="QR Code" /><br><p>👆 Scan this with WhatsApp on your phone</p>';
+                    statusDiv.innerHTML = '<div class="status info">📱 Scan the QR code with WhatsApp → Settings → Linked Devices</div>';
+
+                    // Auto-check status every 3 seconds
+                    setTimeout(checkStatus, 3000);
+                }
+            } else {
+                statusDiv.innerHTML = '<div class="status error">❌ ' + (result.data?.message || 'QR not ready yet') + '</div>';
+                setTimeout(getQRCode, 3000); // Retry after 3 seconds
+            }
+        }
+
+        async function generateQRImage(qrText) {
+            // Use a QR code API to generate image
+            return `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrText)}`;
+        }
+
+        async function checkStatus() {
+            const userId = document.getElementById('userId').value;
+            const statusDiv = document.getElementById('statusInfo');
+
+            const result = await apiCall(`/status/${userId}`);
+
+            if (result.ok) {
+                const status = result.data;
+                let html = '<pre>' + JSON.stringify(status, null, 2) + '</pre>';
+
+                if (status.connected) {
+                    html = '<div class="status success">✅ WhatsApp Connected!</div>' + html;
+                    document.getElementById('sendBtn').disabled = false;
+                    document.getElementById('qrcode').innerHTML = '';
+                } else if (status.sessionExists) {
+                    html = '<div class="status info">⏳ Session exists but not connected yet. Scan QR code!</div>' + html;
+                    setTimeout(checkStatus, 3000); // Auto-refresh
+                } else {
+                    html = '<div class="status error">❌ No session. Click Initialize first.</div>' + html;
+                }
+
+                statusDiv.innerHTML = html;
+            } else {
+                statusDiv.innerHTML = '<div class="status error">❌ Error checking status</div>';
+            }
+        }
+
+        async function sendMessage() {
+            const userId = document.getElementById('userId').value;
+            const phone = document.getElementById('phone').value;
+            const message = document.getElementById('message').value;
+            const statusDiv = document.getElementById('sendStatus');
+
+            if (!phone || !message) {
+                statusDiv.innerHTML = '<div class="status error">❌ Please fill in phone and message</div>';
+                return;
+            }
+
+            statusDiv.innerHTML = '<div class="status info">⏳ Sending message...</div>';
+
+            const result = await apiCall('/send-message', 'POST', {
+                userId: parseInt(userId),
+                to: phone,
+                message: message
+            });
+
+            if (result.ok) {
+                statusDiv.innerHTML = '<div class="status success">✅ Message sent! ID: ' + result.data.messageId + '</div>';
+            } else {
+                statusDiv.innerHTML = '<div class="status error">❌ Error: ' + (result.data?.error || result.error) + '</div>';
+            }
+        }
+
+        // Auto-check status on load
+        window.onload = function() {
+            checkStatus();
+        };
+    </script>
+</body>
+</html>

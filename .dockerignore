@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+.env
+.git
+.gitignore
+*.md
+storage/sessions/*
+!storage/sessions/.gitkeep
+test.html
+qr.html
