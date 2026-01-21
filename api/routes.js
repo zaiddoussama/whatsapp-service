@@ -219,14 +219,23 @@ module.exports = (sessionManager) => {
     router.get('/status/:userId', async (req, res) => {
         try {
             const userId = parseInt(req.params.userId);
+            const client = sessionManager.getSession(userId);
             const status = sessionManager.getSessionStatus(userId);
 
-            res.json({
+            const response = {
                 userId: userId,
                 sessionExists: status.exists,
                 connected: status.connected,
                 status: !status.exists ? 'no_session' : (status.connected ? 'connected' : 'initializing')
-            });
+            };
+
+            // Add phone info if connected
+            if (client && client.isReady && client.client && client.client.info) {
+                response.phoneNumber = client.client.info.wid.user;
+                response.platform = client.client.info.platform;
+            }
+
+            res.json(response);
         } catch (error) {
             console.error('Error in /status:', error);
             res.status(500).json({ error: error.message });
