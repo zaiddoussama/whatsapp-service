@@ -1,6 +1,8 @@
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 class WhatsAppClient {
     constructor(userId, springBootWebhookUrl) {
@@ -9,6 +11,7 @@ class WhatsAppClient {
         this.client = null;
         this.qrCode = null;
         this.isReady = false;
+        this.initializationError = null;
     }
 
     async initialize() {
@@ -115,6 +118,7 @@ class WhatsAppClient {
         // Authentication failure
         this.client.on('auth_failure', async (error) => {
             console.error(`Auth failure for user ${this.userId}:`, error);
+            this.initializationError = error.message;
 
             await this.sendWebhook('/whatsapp/auth-failed', {
                 userId: this.userId,
@@ -122,8 +126,19 @@ class WhatsAppClient {
             });
         });
 
-        // Initialize the client
-        await this.client.initialize();
+        // Initialize the client with timeout
+        console.log(`Starting browser initialization for user ${this.userId}...`);
+
+        // Don't await - let it initialize in background so we can return quickly
+        // The QR code will be sent via webhook when ready
+        this.client.initialize().catch((error) => {
+            console.error(`Client initialization error for user ${this.userId}:`, error);
+            this.initializationError = error.message;
+        });
+
+        // Give it a moment to start
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log(`Browser initialization started for user ${this.userId}`);
     }
 
     async sendMessage(to, message) {
@@ -217,11 +232,59 @@ class WhatsAppClient {
         }
     }
 
-    async disconnect() {
+    async disconnect(clearSession = false) {
+        this.isReady = false;
+        this.qrCode = null;
+        this.initializationError = null;
+
         if (this.client) {
-            await this.client.destroy();
-            this.isReady = false;
+            try {
+                // If clearing session, try to logout first (this clears WhatsApp's session)
+                if (clearSession) {
+                    try {
+                        await this.client.logout();
+                        console.log(`Logged out WhatsApp session for user ${this.userId}`);
+                    } catch (logoutError) {
+                        console.error(`Error during logout for user ${this.userId}:`, logoutError.message);
+                        // Continue - we'll still destroy and clear files
+                    }
+                }
+                await this.client.destroy();
+            } catch (error) {
+                console.error(`Error destroying client for user ${this.userId}:`, error.message);
+                // Continue anyway - we want to clean up the session
+            }
+            this.client = null;
         }
+
+        // If clearing session, delete the session files from disk
+        if (clearSession) {
+            await this.clearSessionFiles();
+        }
+    }
+
+    /**
+     * Delete session files from disk to force a fresh QR code on next init.
+     */
+    async clearSessionFiles() {
+        const sessionPath = path.join('./storage/sessions', `session-user-${this.userId}`);
+
+        try {
+            if (fs.existsSync(sessionPath)) {
+                fs.rmSync(sessionPath, { recursive: true, force: true });
+                console.log(`Cleared session files for user ${this.userId} at ${sessionPath}`);
+            }
+        } catch (error) {
+            console.error(`Error clearing session files for user ${this.userId}:`, error.message);
+            // Don't throw - this shouldn't block the flow
+        }
+    }
+
+    /**
+     * Get the session directory path for this user.
+     */
+    getSessionPath() {
+        return path.join('./storage/sessions', `session-user-${this.userId}`);
     }
 
     async sendWebhook(endpoint, data) {

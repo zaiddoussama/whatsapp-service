@@ -5,17 +5,37 @@ module.exports = (sessionManager) => {
     // Initialize WhatsApp for a user
     router.post('/init', async (req, res) => {
         try {
-            const { userId } = req.body;
+            const { userId, force, clearSession } = req.body;
 
             if (!userId) {
                 return res.status(400).json({ error: 'userId is required' });
             }
 
+            // Determine if we should clear session files (force implies clearSession)
+            const shouldClearSession = clearSession || force;
+
+            // If session exists and force=true, destroy it first
             if (sessionManager.hasSession(userId)) {
-                return res.status(400).json({
-                    error: 'Session already exists for this user',
-                    userId: userId
-                });
+                if (force) {
+                    console.log(`Force reinitializing session for user ${userId} (clearSession=${shouldClearSession})`);
+                    try {
+                        await sessionManager.destroySession(userId, shouldClearSession);
+                    } catch (err) {
+                        console.error(`Error destroying old session: ${err.message}`);
+                        // Force remove from map if destroy fails
+                        sessionManager.sessions.delete(userId);
+                    }
+                } else {
+                    return res.status(400).json({
+                        error: 'Session already exists for this user',
+                        userId: userId,
+                        hint: 'Use force=true to reinitialize'
+                    });
+                }
+            } else if (shouldClearSession) {
+                // No in-memory session but user wants to clear - clear any leftover files
+                console.log(`Clearing leftover session files for user ${userId}`);
+                await sessionManager.destroySession(userId, true);
             }
 
             await sessionManager.createSession(userId);
@@ -27,6 +47,41 @@ module.exports = (sessionManager) => {
             });
         } catch (error) {
             console.error('Error in /init:', error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    // Reconnect WhatsApp - clears old session and generates new QR code
+    // This is the user-friendly endpoint for "Generate New QR Code"
+    router.post('/reconnect', async (req, res) => {
+        try {
+            const { userId } = req.body;
+
+            if (!userId) {
+                return res.status(400).json({ error: 'userId is required' });
+            }
+
+            console.log(`Reconnecting WhatsApp for user ${userId} - clearing old session and generating new QR`);
+
+            // Destroy existing session and clear all session files
+            try {
+                await sessionManager.destroySession(userId, true);
+            } catch (err) {
+                console.error(`Error destroying session during reconnect: ${err.message}`);
+                sessionManager.sessions.delete(userId);
+            }
+
+            // Create fresh session
+            await sessionManager.createSession(userId);
+
+            res.json({
+                success: true,
+                message: 'WhatsApp reconnection started. A new QR code will be generated.',
+                userId: userId,
+                nextStep: 'Poll /api/qr/{userId} or wait for qr-ready webhook'
+            });
+        } catch (error) {
+            console.error('Error in /reconnect:', error);
             res.status(500).json({ error: error.message });
         }
     });
@@ -222,17 +277,54 @@ module.exports = (sessionManager) => {
             const client = sessionManager.getSession(userId);
             const status = sessionManager.getSessionStatus(userId);
 
+            let statusStr = 'no_session';
+            let action = null;
+            let actionHint = null;
+
+            if (status.exists) {
+                if (status.connected) {
+                    statusStr = 'connected';
+                } else if (client && client.initializationError) {
+                    statusStr = 'error';
+                    action = 'reconnect';
+                    actionHint = 'Call POST /api/reconnect with {userId} to generate a new QR code';
+                } else if (client && client.qrCode) {
+                    statusStr = 'waiting_scan';
+                    action = 'scan_qr';
+                    actionHint = 'Scan the QR code with WhatsApp on your phone';
+                } else {
+                    statusStr = 'initializing';
+                    action = 'wait_or_reconnect';
+                    actionHint = 'Wait for QR code, or call POST /api/reconnect to force a new session';
+                }
+            } else {
+                action = 'init';
+                actionHint = 'Call POST /api/init with {userId} to start a new session';
+            }
+
             const response = {
                 userId: userId,
                 sessionExists: status.exists,
                 connected: status.connected,
-                status: !status.exists ? 'no_session' : (status.connected ? 'connected' : 'initializing')
+                status: statusStr,
+                action: action,
+                actionHint: actionHint
             };
+
+            // Add error info if there was an initialization error
+            if (client && client.initializationError) {
+                response.error = client.initializationError;
+            }
 
             // Add phone info if connected
             if (client && client.isReady && client.client && client.client.info) {
                 response.phoneNumber = client.client.info.wid.user;
                 response.platform = client.client.info.platform;
+            }
+
+            // Add QR code if available and not connected
+            if (client && client.qrCode && !client.isReady) {
+                response.qrCode = client.qrCode;
             }
 
             res.json(response);
@@ -245,17 +337,19 @@ module.exports = (sessionManager) => {
     // Disconnect WhatsApp
     router.post('/disconnect', async (req, res) => {
         try {
-            const { userId } = req.body;
+            const { userId, clearSession } = req.body;
 
             if (!userId) {
                 return res.status(400).json({ error: 'userId is required' });
             }
 
-            await sessionManager.destroySession(userId);
+            await sessionManager.destroySession(userId, clearSession || false);
 
             res.json({
                 success: true,
-                message: 'WhatsApp disconnected successfully'
+                message: clearSession
+                    ? 'WhatsApp disconnected and session cleared. You will need to scan QR code again.'
+                    : 'WhatsApp disconnected successfully. Session preserved for quick reconnect.'
             });
         } catch (error) {
             console.error('Error in /disconnect:', error);

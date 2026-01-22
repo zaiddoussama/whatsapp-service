@@ -23,11 +23,15 @@ class SessionManager {
         return this.sessions.get(userId);
     }
 
-    async destroySession(userId) {
+    async destroySession(userId, clearSession = false) {
         const client = this.sessions.get(userId);
         if (client) {
-            await client.disconnect();
+            await client.disconnect(clearSession);
             this.sessions.delete(userId);
+        } else if (clearSession) {
+            // Even if no in-memory session, try to clear files on disk
+            const tempClient = new WhatsAppClient(userId, this.springBootUrl);
+            await tempClient.clearSessionFiles();
         }
     }
 
