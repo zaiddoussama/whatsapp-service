@@ -85,39 +85,58 @@ app.use((error, req, res, next) => {
 });
 
 // Start server
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
     console.log('\n✅ WhatsApp Service is running!');
     console.log(`📡 Listening on http://localhost:${PORT}`);
     console.log(`🔗 Spring Boot: ${SPRING_BOOT_URL}`);
+
+    // Restore existing sessions from disk
+    await sessionManager.restoreSessions();
+
     console.log('\nReady to accept requests!\n');
 });
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-    console.log('\n\n⚠️  Shutting down gracefully...');
+// Graceful shutdown handler
+async function gracefulShutdown(signal) {
+    console.log(`\n\n⚠️  ${signal} received. Shutting down gracefully...`);
 
     const sessions = sessionManager.getAllSessions();
-    console.log(`Disconnecting ${sessions.length} active sessions...`);
+    console.log(`Disconnecting ${sessions.length} active session(s)...`);
 
-    for (const userId of sessions) {
+    // Disconnect all sessions (preserving session data on disk)
+    const disconnectPromises = sessions.map(async (userId) => {
         try {
-            await sessionManager.destroySession(userId);
-            console.log(`✓ Disconnected user ${userId}`);
+            // Don't clear session - we want to preserve it for next startup
+            await sessionManager.destroySession(userId, false);
+            console.log(`✓ Disconnected user ${userId} (session preserved)`);
         } catch (error) {
             console.error(`✗ Error disconnecting user ${userId}:`, error.message);
         }
-    }
+    });
+
+    // Wait for all disconnections with timeout
+    await Promise.race([
+        Promise.all(disconnectPromises),
+        new Promise(resolve => setTimeout(resolve, 25000)) // 25 second timeout
+    ]);
+
+    console.log('All sessions disconnected');
 
     server.close(() => {
         console.log('✅ Server closed');
         process.exit(0);
     });
-});
 
-process.on('SIGTERM', async () => {
-    console.log('SIGTERM received, shutting down...');
-    process.kill(process.pid, 'SIGINT');
-});
+    // Force exit after 30 seconds if server.close hangs
+    setTimeout(() => {
+        console.log('Force exiting...');
+        process.exit(0);
+    }, 5000);
+}
+
+// Handle shutdown signals
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {

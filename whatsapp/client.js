@@ -17,6 +17,9 @@ class WhatsAppClient {
     async initialize() {
         console.log(`Initializing WhatsApp client for user ${this.userId}...`);
 
+        // Clean up stale Chrome lock files before starting
+        await this.cleanupLockFiles();
+
         // Create client with persistent session
         this.client = new Client({
             authStrategy: new LocalAuth({
@@ -36,7 +39,8 @@ class WhatsAppClient {
                 ]
             },
             webVersionCache: {
-                type: 'none'
+                type: 'remote',
+                remotePath: 'https://raw.githubusercontent.com/AhmadMBaker/AhmadMBaker.github.io/refs/heads/main/wa-version.json'
             }
         });
 
@@ -233,6 +237,7 @@ class WhatsAppClient {
     }
 
     async disconnect(clearSession = false) {
+        console.log(`Disconnecting WhatsApp client for user ${this.userId} (clearSession=${clearSession})...`);
         this.isReady = false;
         this.qrCode = null;
         this.initializationError = null;
@@ -249,10 +254,26 @@ class WhatsAppClient {
                         // Continue - we'll still destroy and clear files
                     }
                 }
-                await this.client.destroy();
+
+                // Gracefully destroy the client (closes browser properly)
+                try {
+                    await this.client.destroy();
+                    console.log(`Browser closed for user ${this.userId}`);
+                } catch (destroyError) {
+                    console.error(`Error destroying client for user ${this.userId}:`, destroyError.message);
+
+                    // Force kill the browser if destroy fails
+                    try {
+                        if (this.client.pupBrowser) {
+                            await this.client.pupBrowser.close();
+                            console.log(`Force closed browser for user ${this.userId}`);
+                        }
+                    } catch (forceCloseError) {
+                        // Ignore
+                    }
+                }
             } catch (error) {
-                console.error(`Error destroying client for user ${this.userId}:`, error.message);
-                // Continue anyway - we want to clean up the session
+                console.error(`Error during disconnect for user ${this.userId}:`, error.message);
             }
             this.client = null;
         }
@@ -261,6 +282,64 @@ class WhatsAppClient {
         if (clearSession) {
             await this.clearSessionFiles();
         }
+
+        console.log(`Disconnected WhatsApp client for user ${this.userId}`);
+    }
+
+    /**
+     * Clean up stale Chrome lock files that prevent browser from starting.
+     * This happens when the container crashes or doesn't shut down cleanly.
+     * Chrome stores the hostname in these files, so when Docker container ID changes,
+     * Chrome thinks "another computer" is using the profile.
+     */
+    async cleanupLockFiles() {
+        const sessionPath = this.getSessionPath();
+        console.log(`Cleaning lock files in: ${sessionPath}`);
+
+        if (!fs.existsSync(sessionPath)) {
+            console.log(`Session path does not exist yet: ${sessionPath}`);
+            return;
+        }
+
+        // Recursively find and delete all lock files
+        const cleanDirectory = (dir) => {
+            let cleaned = 0;
+            try {
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    const fullPath = path.join(dir, entry.name);
+
+                    // Check if it's a lock file by name
+                    const isLockFile = [
+                        'SingletonLock', 'SingletonSocket', 'SingletonCookie',
+                        'lockfile', 'LOCK', '.lock'
+                    ].some(lock => entry.name === lock || entry.name.endsWith('.lock'));
+
+                    if (isLockFile) {
+                        try {
+                            if (entry.isDirectory()) {
+                                fs.rmSync(fullPath, { recursive: true, force: true });
+                            } else {
+                                fs.unlinkSync(fullPath);
+                            }
+                            console.log(`  Removed lock: ${fullPath}`);
+                            cleaned++;
+                        } catch (e) {
+                            console.log(`  Failed to remove: ${fullPath} - ${e.message}`);
+                        }
+                    } else if (entry.isDirectory()) {
+                        // Recurse into subdirectories
+                        cleaned += cleanDirectory(fullPath);
+                    }
+                }
+            } catch (error) {
+                // Directory might not be readable
+            }
+            return cleaned;
+        };
+
+        const totalCleaned = cleanDirectory(sessionPath);
+        console.log(`Lock file cleanup complete: ${totalCleaned} file(s) removed`);
     }
 
     /**

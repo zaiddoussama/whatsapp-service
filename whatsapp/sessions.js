@@ -1,9 +1,61 @@
 const WhatsAppClient = require('./client');
+const fs = require('fs');
+const path = require('path');
 
 class SessionManager {
     constructor(springBootUrl) {
         this.sessions = new Map(); // userId -> WhatsAppClient
         this.springBootUrl = springBootUrl;
+        this.sessionsPath = './storage/sessions';
+    }
+
+    /**
+     * Restore all sessions from disk on startup.
+     * This scans the sessions directory and reinitializes clients for existing sessions.
+     */
+    async restoreSessions() {
+        console.log('Checking for existing sessions to restore...');
+
+        try {
+            // Ensure the sessions directory exists
+            if (!fs.existsSync(this.sessionsPath)) {
+                fs.mkdirSync(this.sessionsPath, { recursive: true });
+                console.log('No existing sessions found (directory created)');
+                return;
+            }
+
+            // List session directories (format: session-user-{userId})
+            const entries = fs.readdirSync(this.sessionsPath, { withFileTypes: true });
+            const sessionDirs = entries
+                .filter(entry => entry.isDirectory() && entry.name.startsWith('session-user-'))
+                .map(entry => {
+                    const match = entry.name.match(/session-user-(\d+)/);
+                    return match ? parseInt(match[1]) : null;
+                })
+                .filter(userId => userId !== null);
+
+            if (sessionDirs.length === 0) {
+                console.log('No existing sessions found');
+                return;
+            }
+
+            console.log(`Found ${sessionDirs.length} session(s) to restore: ${sessionDirs.join(', ')}`);
+
+            // Restore each session
+            for (const userId of sessionDirs) {
+                try {
+                    console.log(`Restoring session for user ${userId}...`);
+                    await this.createSession(userId);
+                    console.log(`✓ Session restored for user ${userId}`);
+                } catch (error) {
+                    console.error(`✗ Failed to restore session for user ${userId}:`, error.message);
+                }
+            }
+
+            console.log('Session restoration complete');
+        } catch (error) {
+            console.error('Error restoring sessions:', error);
+        }
     }
 
     async createSession(userId) {
