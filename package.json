@@ -21,7 +21,7 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "qrcode": "^1.5.3",
-    "whatsapp-web.js": "^1.34.4"
+    "whatsapp-web.js": "github:timothydillan/whatsapp-web.js#fix/duplicate-events-and-bindings"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

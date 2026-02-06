@@ -11,6 +11,7 @@ class WhatsAppClient {
         this.client = null;
         this.qrCode = null;
         this.isReady = false;
+        this.isAuthenticated = false; // Track authentication state to prevent duplicate events
         this.initializationError = null;
     }
 
@@ -39,8 +40,7 @@ class WhatsAppClient {
                 ]
             },
             webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/AhmadMBaker/AhmadMBaker.github.io/refs/heads/main/wa-version.json'
+                type: 'none'
             }
         });
 
@@ -48,6 +48,8 @@ class WhatsAppClient {
         this.client.on('qr', async (qr) => {
             console.log(`QR Code generated for user ${this.userId}`);
             this.qrCode = qr;
+            this.isReady = false; // Reset ready state when new QR is generated
+            this.isAuthenticated = false; // Reset authenticated state for new QR
 
             // Generate QR code image as base64
             const qrImage = await qrcode.toDataURL(qr);
@@ -60,16 +62,68 @@ class WhatsAppClient {
             });
         });
 
-        // Ready event - WhatsApp is connected
+        // Authenticated event - QR code scanned successfully, session being established
+        this.client.on('authenticated', async () => {
+            // Prevent duplicate authenticated events
+            if (this.isAuthenticated) {
+                console.log(`User ${this.userId} already authenticated, skipping duplicate event`);
+                return;
+            }
+
+            this.isAuthenticated = true;
+            this.qrCode = null; // Clear QR code since it's been scanned
+            console.log(`WhatsApp AUTHENTICATED for user ${this.userId} - QR scan successful`);
+
+            // Notify Spring Boot that authentication succeeded (QR was scanned)
+            await this.sendWebhook('/whatsapp/authenticated', {
+                userId: this.userId,
+                status: 'authenticated'
+            });
+
+            // Fallback: If 'ready' event doesn't fire within 30 seconds, check manually
+            setTimeout(async () => {
+                if (!this.isReady && this.client && this.client.info) {
+                    console.log(`User ${this.userId}: Ready event didn't fire, but client has info - forcing ready state`);
+                    this.isReady = true;
+                    this.qrCode = null;
+
+                    const info = this.client.info;
+                    await this.sendWebhook('/whatsapp/connected', {
+                        userId: this.userId,
+                        phoneNumber: info?.wid?.user,
+                        platform: info?.platform
+                    });
+                } else if (!this.isReady) {
+                    console.log(`User ${this.userId}: Still not ready after 30s, client state: hasClient=${!!this.client}, hasInfo=${!!(this.client?.info)}`);
+                }
+            }, 30000);
+        });
+
+        // Loading screen event - WhatsApp is loading after authentication
+        this.client.on('loading_screen', (percent, message) => {
+            console.log(`WhatsApp loading for user ${this.userId}: ${percent}% - ${message}`);
+        });
+
+        // Ready event - WhatsApp is fully connected and ready to send/receive messages
         this.client.on('ready', async () => {
-            console.log(`WhatsApp ready for user ${this.userId}`);
+            console.log(`WhatsApp READY for user ${this.userId}`);
+
+            // Prevent duplicate ready events
+            if (this.isReady) {
+                console.log(`User ${this.userId} already marked as ready, skipping duplicate event`);
+                return;
+            }
+
             this.isReady = true;
+            this.qrCode = null;
 
             const info = this.client.info;
+            console.log(`User ${this.userId} connected with phone: ${info?.wid?.user}, platform: ${info?.platform}`);
+
             await this.sendWebhook('/whatsapp/connected', {
                 userId: this.userId,
-                phoneNumber: info.wid.user,
-                platform: info.platform
+                phoneNumber: info?.wid?.user,
+                platform: info?.platform
             });
         });
 
@@ -146,8 +200,15 @@ class WhatsAppClient {
     }
 
     async sendMessage(to, message) {
+        // Allow sending if ready, OR if authenticated and client has info (ready event sometimes doesn't fire)
         if (!this.isReady) {
-            throw new Error('WhatsApp client is not ready');
+            // Check if we're authenticated and client is actually connected
+            if (this.isAuthenticated && this.client && this.client.info) {
+                console.log(`User ${this.userId}: Not ready but authenticated with info - forcing ready state for sendMessage`);
+                this.isReady = true;
+            } else {
+                throw new Error('WhatsApp client is not ready');
+            }
         }
 
         try {
@@ -171,8 +232,14 @@ class WhatsAppClient {
     }
 
     async sendMediaMessage(to, mediaUrl, caption) {
+        // Allow sending if ready, OR if authenticated and client has info
         if (!this.isReady) {
-            throw new Error('WhatsApp client is not ready');
+            if (this.isAuthenticated && this.client && this.client.info) {
+                console.log(`User ${this.userId}: Not ready but authenticated with info - forcing ready state for sendMediaMessage`);
+                this.isReady = true;
+            } else {
+                throw new Error('WhatsApp client is not ready');
+            }
         }
 
         try {
