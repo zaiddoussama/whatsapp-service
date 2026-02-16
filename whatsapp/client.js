@@ -131,10 +131,34 @@ class WhatsAppClient {
         this.client.on('message', async (message) => {
             console.log(`Message received from ${message.from}`);
 
+            // Resolve the actual phone number for LID contacts
+            // WhatsApp uses LID (Linked Device ID) format for unregistered contacts
+            // e.g. 242958397890794@lid instead of 212619805732@c.us
+            let resolvedFrom = message.from;
+            const isLidContact = message.from.endsWith('@lid');
+
+            if (isLidContact) {
+                try {
+                    const contact = await message.getContact();
+                    if (contact.number) {
+                        resolvedFrom = contact.number + '@c.us';
+                        console.log(`LID resolved via contact.number: ${message.from} → ${resolvedFrom}`);
+                    } else if (contact.id && contact.id._serialized && contact.id._serialized.endsWith('@c.us')) {
+                        resolvedFrom = contact.id._serialized;
+                        console.log(`LID resolved via contact.id: ${message.from} → ${resolvedFrom}`);
+                    } else {
+                        console.log(`Could not resolve LID ${message.from} to phone number, will use LID for routing`);
+                    }
+                } catch (err) {
+                    console.error(`Error resolving LID contact ${message.from}:`, err.message);
+                }
+            }
+
             const messageData = {
                 userId: this.userId,
                 messageId: message.id.id,
-                from: message.from,
+                from: resolvedFrom,       // resolved phone or original LID
+                chatId: message.from,     // always the original WhatsApp chat ID for replies
                 to: message.to,
                 body: message.body,
                 type: message.type, // text, image, document, etc.
@@ -212,8 +236,13 @@ class WhatsAppClient {
         }
 
         try {
-            // Format phone number (must include country code)
-            const chatId = to.includes('@c.us') ? to : `${to}@c.us`;
+            // Format phone number - support both @c.us and @lid chat IDs
+            let chatId;
+            if (to.includes('@c.us') || to.includes('@lid')) {
+                chatId = to;
+            } else {
+                chatId = `${to}@c.us`;
+            }
 
             // sendSeen: false fixes "markedUnread" error in newer WhatsApp Web versions
             const sentMessage = await this.client.sendMessage(chatId, message, {
@@ -243,7 +272,13 @@ class WhatsAppClient {
         }
 
         try {
-            const chatId = to.includes('@c.us') ? to : `${to}@c.us`;
+            // Support both @c.us and @lid chat IDs
+            let chatId;
+            if (to.includes('@c.us') || to.includes('@lid')) {
+                chatId = to;
+            } else {
+                chatId = `${to}@c.us`;
+            }
 
             // Download media from URL
             const response = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
