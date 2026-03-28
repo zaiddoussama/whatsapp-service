@@ -1,0 +1,11 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+healthcheckPath = "/api/health"
+healthcheckTimeout = 120
+# Mount a Railway persistent volume to /app/storage/sessions
+# Configure the volume in Railway dashboard: Mount path = /app/storage/sessions
