@@ -241,7 +241,9 @@ class WhatsAppClient {
             if (to.includes('@c.us') || to.includes('@lid')) {
                 chatId = to;
             } else {
-                chatId = `${to}@c.us`;
+                // Strip '+' prefix - whatsapp-web.js expects numbers without it
+                const cleanNumber = to.startsWith('+') ? to.substring(1) : to;
+                chatId = `${cleanNumber}@c.us`;
             }
 
             // sendSeen: false fixes "markedUnread" error in newer WhatsApp Web versions
@@ -277,7 +279,9 @@ class WhatsAppClient {
             if (to.includes('@c.us') || to.includes('@lid')) {
                 chatId = to;
             } else {
-                chatId = `${to}@c.us`;
+                // Strip '+' prefix - whatsapp-web.js expects numbers without it
+                const cleanNumber = to.startsWith('+') ? to.substring(1) : to;
+                chatId = `${cleanNumber}@c.us`;
             }
 
             // Download media from URL
