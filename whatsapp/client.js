@@ -243,7 +243,27 @@ class WhatsAppClient {
             } else {
                 // Strip '+' prefix - whatsapp-web.js expects numbers without it
                 const cleanNumber = to.startsWith('+') ? to.substring(1) : to;
-                chatId = `${cleanNumber}@c.us`;
+
+                // Validate that the number exists on WhatsApp before sending.
+                // getNumberId returns null for numbers not registered on WhatsApp,
+                // which prevents the "Cannot read properties of undefined (reading 'getChat')" crash.
+                try {
+                    const numberId = await this.client.getNumberId(cleanNumber);
+                    if (numberId) {
+                        chatId = numberId._serialized; // use the exact id WhatsApp knows about
+                    } else {
+                        console.warn(`User ${this.userId}: Number ${cleanNumber} is not on WhatsApp`);
+                        return {
+                            success: false,
+                            error: 'Number is not registered on WhatsApp',
+                            phoneNumber: to
+                        };
+                    }
+                } catch (lookupErr) {
+                    // getNumberId can fail if the session is degraded; fall back to direct chatId
+                    console.warn(`User ${this.userId}: getNumberId lookup failed, falling back to direct chatId:`, lookupErr.message);
+                    chatId = `${cleanNumber}@c.us`;
+                }
             }
 
             // sendSeen: false fixes "markedUnread" error in newer WhatsApp Web versions
@@ -279,9 +299,19 @@ class WhatsAppClient {
             if (to.includes('@c.us') || to.includes('@lid')) {
                 chatId = to;
             } else {
-                // Strip '+' prefix - whatsapp-web.js expects numbers without it
                 const cleanNumber = to.startsWith('+') ? to.substring(1) : to;
-                chatId = `${cleanNumber}@c.us`;
+                try {
+                    const numberId = await this.client.getNumberId(cleanNumber);
+                    if (numberId) {
+                        chatId = numberId._serialized;
+                    } else {
+                        console.warn(`User ${this.userId}: Number ${cleanNumber} is not on WhatsApp`);
+                        return { success: false, error: 'Number is not registered on WhatsApp', phoneNumber: to };
+                    }
+                } catch (lookupErr) {
+                    console.warn(`User ${this.userId}: getNumberId lookup failed, falling back:`, lookupErr.message);
+                    chatId = `${cleanNumber}@c.us`;
+                }
             }
 
             // Download media from URL
