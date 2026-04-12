@@ -13,6 +13,7 @@ class WhatsAppClient {
         this.isReady = false;
         this.isAuthenticated = false; // Track authentication state to prevent duplicate events
         this.initializationError = null;
+        this.isReconnecting = false;   // Guard against concurrent reconnect attempts
     }
 
     async initialize() {
@@ -190,11 +191,17 @@ class WhatsAppClient {
         this.client.on('disconnected', async (reason) => {
             console.log(`WhatsApp disconnected for user ${this.userId}: ${reason}`);
             this.isReady = false;
+            this.isAuthenticated = false;
 
             await this.sendWebhook('/whatsapp/disconnected', {
                 userId: this.userId,
                 reason: reason
             });
+
+            // Auto-reconnect after a short delay, preserving the saved session so the
+            // user does NOT have to scan the QR code again (unless the session was
+            // explicitly invalidated, in which case a new QR will be generated).
+            this.scheduleReconnect(5000);
         });
 
         // Authentication failure
@@ -260,7 +267,14 @@ class WhatsAppClient {
                         };
                     }
                 } catch (lookupErr) {
-                    // getNumberId can fail if the session is degraded; fall back to direct chatId
+                    if (this.isBrowserCrashError(lookupErr)) {
+                        // Browser/page has crashed — mark as not ready and reconnect
+                        console.error(`User ${this.userId}: Browser crash detected in getNumberId, triggering reconnect:`, lookupErr.message);
+                        this.isReady = false;
+                        this.scheduleReconnect(3000);
+                        throw new Error('WhatsApp service is temporarily unavailable, reconnecting...');
+                    }
+                    // Other transient error — fall back to direct chatId
                     console.warn(`User ${this.userId}: getNumberId lookup failed, falling back to direct chatId:`, lookupErr.message);
                     chatId = `${cleanNumber}@c.us`;
                 }
@@ -278,6 +292,11 @@ class WhatsAppClient {
             };
         } catch (error) {
             console.error('Error sending message:', error);
+            if (this.isBrowserCrashError(error)) {
+                // The Puppeteer execution context is gone — mark not-ready and reconnect
+                this.isReady = false;
+                this.scheduleReconnect(3000);
+            }
             throw error;
         }
     }
@@ -336,6 +355,10 @@ class WhatsAppClient {
             };
         } catch (error) {
             console.error('Error sending media:', error);
+            if (this.isBrowserCrashError(error)) {
+                this.isReady = false;
+                this.scheduleReconnect(3000);
+            }
             throw error;
         }
     }
@@ -370,6 +393,55 @@ class WhatsAppClient {
         } catch (error) {
             console.error('Error marking as read:', error);
         }
+    }
+
+    /**
+     * Schedule a session-preserving reconnect attempt.
+     * Guards against concurrent reconnects with isReconnecting flag.
+     */
+    scheduleReconnect(delayMs = 5000) {
+        if (this.isReconnecting) {
+            console.log(`User ${this.userId}: reconnect already scheduled, skipping`);
+            return;
+        }
+        this.isReconnecting = true;
+        console.log(`User ${this.userId}: scheduling reconnect in ${delayMs}ms...`);
+        setTimeout(async () => {
+            try {
+                console.log(`User ${this.userId}: attempting auto-reconnect...`);
+                // Destroy the broken browser instance without clearing saved session files
+                if (this.client) {
+                    try { await this.client.destroy(); } catch (_) { /* ignore */ }
+                    this.client = null;
+                }
+                this.isReady = false;
+                this.isAuthenticated = false;
+                this.qrCode = null;
+                // Re-initialize — LocalAuth will restore the saved session automatically
+                await this.initialize();
+                console.log(`User ${this.userId}: auto-reconnect initialization triggered`);
+            } catch (err) {
+                console.error(`User ${this.userId}: auto-reconnect failed:`, err.message);
+            } finally {
+                this.isReconnecting = false;
+            }
+        }, delayMs);
+    }
+
+    /**
+     * Returns true when the error is caused by a crashed Puppeteer/WWebJS
+     * execution context rather than a bad phone number.
+     */
+    isBrowserCrashError(err) {
+        const msg = err && err.message ? err.message : '';
+        return (
+            msg.includes('WidFactory') ||
+            msg.includes('Execution context was destroyed') ||
+            msg.includes('Session closed') ||
+            msg.includes('Target closed') ||
+            msg.includes('Protocol error') ||
+            msg.includes('Cannot read properties of undefined')
+        );
     }
 
     async disconnect(clearSession = false) {
