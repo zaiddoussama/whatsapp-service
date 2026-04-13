@@ -14,6 +14,8 @@ class WhatsAppClient {
         this.isAuthenticated = false; // Track authentication state to prevent duplicate events
         this.initializationError = null;
         this.isReconnecting = false;   // Guard against concurrent reconnect attempts
+        this.heartbeatInterval = null;       // Periodic health check timer
+        this.proactiveReconnectTimer = null; // Proactive reconnect to prevent ~1hr degradation
     }
 
     async initialize() {
@@ -37,7 +39,15 @@ class WhatsAppClient {
                     '--disable-accelerated-2d-canvas',
                     '--no-first-run',
                     '--no-zygote',
-                    '--disable-gpu'
+                    '--disable-gpu',
+                    // Prevent Chrome from throttling/killing background tabs over time.
+                    // Without these, the WhatsApp Web JS context degrades after ~1 hour.
+                    '--disable-background-timer-throttling',
+                    '--disable-renderer-backgrounding',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-hang-monitor',
+                    // Limit renderer memory to reduce OOM kills on constrained VPS
+                    '--js-flags=--max-old-space-size=512'
                 ]
             },
             webVersionCache: {
@@ -126,6 +136,10 @@ class WhatsAppClient {
                 phoneNumber: info?.wid?.user,
                 platform: info?.platform
             });
+
+            // Start heartbeat to catch silent crashes + proactive 45-min reconnect
+            // to prevent the ~1 hour Chromium context degradation in production.
+            this.startHeartbeat();
         });
 
         // Incoming message event - forward to Spring Boot
@@ -405,6 +419,8 @@ class WhatsAppClient {
             return;
         }
         this.isReconnecting = true;
+        // Stop heartbeat timers before reconnecting — they'll restart after ready fires
+        this.stopHeartbeat();
         console.log(`User ${this.userId}: scheduling reconnect in ${delayMs}ms...`);
         setTimeout(async () => {
             try {
@@ -429,6 +445,63 @@ class WhatsAppClient {
     }
 
     /**
+     * Start a 2-minute health check + a proactive 45-minute reconnect.
+     * The proactive reconnect prevents the ~1-hour Chromium context degradation
+     * seen in production: Chrome's background throttling slowly kills the WhatsApp
+     * Web JS context, so we proactively reconnect before it degrades.
+     */
+    startHeartbeat() {
+        this.stopHeartbeat(); // clear any stale timers first
+
+        // Check getState() every 2 minutes — catches silent crashes before any user message hits them
+        this.heartbeatInterval = setInterval(() => this.checkHealth(), 2 * 60 * 1000);
+
+        // Proactively reconnect every 45 minutes — prevents the ~1hr degradation cycle
+        this.proactiveReconnectTimer = setTimeout(() => {
+            if (!this.isReconnecting) {
+                console.log(`User ${this.userId}: proactive scheduled reconnect to prevent Chromium degradation`);
+                this.scheduleReconnect(1000);
+            }
+        }, 45 * 60 * 1000);
+
+        console.log(`User ${this.userId}: heartbeat started (health check every 2m, proactive reconnect in 45m)`);
+    }
+
+    stopHeartbeat() {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+        if (this.proactiveReconnectTimer) {
+            clearTimeout(this.proactiveReconnectTimer);
+            this.proactiveReconnectTimer = null;
+        }
+    }
+
+    /**
+     * Called by the heartbeat interval. Checks WhatsApp state and triggers
+     * reconnect if the connection has silently degraded.
+     */
+    async checkHealth() {
+        if (!this.isReady || this.isReconnecting || !this.client) return;
+        try {
+            const state = await this.client.getState();
+            if (state !== 'CONNECTED') {
+                console.warn(`User ${this.userId}: heartbeat detected bad state: ${state}, triggering reconnect`);
+                this.isReady = false;
+                this.scheduleReconnect(2000);
+            }
+        } catch (err) {
+            if (this.isBrowserCrashError(err)) {
+                console.warn(`User ${this.userId}: heartbeat detected browser crash, triggering reconnect:`, err.message);
+                this.isReady = false;
+                this.scheduleReconnect(2000);
+            }
+            // Non-crash errors (transient) are ignored — next heartbeat will retry
+        }
+    }
+
+    /**
      * Returns true when the error is caused by a crashed Puppeteer/WWebJS
      * execution context rather than a bad phone number.
      */
@@ -449,6 +522,7 @@ class WhatsAppClient {
         this.isReady = false;
         this.qrCode = null;
         this.initializationError = null;
+        this.stopHeartbeat();
 
         if (this.client) {
             try {
