@@ -46,8 +46,15 @@ class WhatsAppClient {
                     '--disable-renderer-backgrounding',
                     '--disable-backgrounding-occluded-windows',
                     '--disable-hang-monitor',
-                    // Limit renderer memory to reduce OOM kills on constrained VPS
-                    '--js-flags=--max-old-space-size=512'
+                    // Reduce per-instance memory footprint on constrained VPS
+                    '--js-flags=--max-old-space-size=512',
+                    '--disable-extensions',
+                    '--disable-default-apps',
+                    '--disable-sync',
+                    '--disable-translate',
+                    '--metrics-recording-only',
+                    '--no-default-browser-check',
+                    '--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider'
                 ]
             },
             webVersionCache: {
@@ -145,6 +152,12 @@ class WhatsAppClient {
         // Incoming message event - forward to Spring Boot
         this.client.on('message', async (message) => {
             console.log(`Message received from ${message.from}`);
+
+            // Send typing indicator — best effort, never block message processing
+            try {
+                const chat = await message.getChat();
+                await chat.sendStateTyping();
+            } catch (_) { /* ignore — typing is cosmetic */ }
 
             // Resolve the actual phone number for LID contacts
             // WhatsApp uses LID (Linked Device ID) format for unregistered contacts
@@ -392,6 +405,14 @@ class WhatsAppClient {
             console.error('Error getting contact info:', error);
             return null;
         }
+    }
+
+    async sendTyping(chatId) {
+        if (!this.isReady || !this.client) return;
+        try {
+            const chat = await this.client.getChatById(chatId);
+            await chat.sendStateTyping();
+        } catch (_) { /* ignore */ }
     }
 
     async markAsRead(messageId) {

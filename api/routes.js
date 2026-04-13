@@ -357,6 +357,16 @@ module.exports = (sessionManager) => {
         }
     });
 
+    // Send typing indicator — best effort, never errors out
+    router.post('/send-typing', async (req, res) => {
+        const { userId, chatId } = req.body;
+        const client = sessionManager.getSession(userId);
+        if (client) {
+            await client.sendTyping(chatId);
+        }
+        res.json({ success: true });
+    });
+
     // Health check
     router.get('/health', (req, res) => {
         const activeSessions = sessionManager.getAllSessions();
