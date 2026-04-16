@@ -14,8 +14,11 @@ class WhatsAppClient {
         this.isAuthenticated = false; // Track authentication state to prevent duplicate events
         this.initializationError = null;
         this.isReconnecting = false;   // Guard against concurrent reconnect attempts
+        this.reconnectAttempts = 0;    // Tracks consecutive reconnect attempts for exponential backoff
+        this.maxReconnectAttempts = 10; // Stop trying after this many consecutive failures
         this.heartbeatInterval = null;       // Periodic health check timer
         this.proactiveReconnectTimer = null; // Proactive reconnect to prevent ~1hr degradation
+        this.recentSendFailures = [];  // Timestamps of recent send failures for storm detection
     }
 
     async initialize() {
@@ -134,6 +137,8 @@ class WhatsAppClient {
 
             this.isReady = true;
             this.qrCode = null;
+            this.reconnectAttempts = 0; // Reset on successful connection
+            this.recentSendFailures = []; // Clear failure history on fresh connection
 
             const info = this.client.info;
             console.log(`User ${this.userId} connected with phone: ${info?.wid?.user}, platform: ${info?.platform}`);
@@ -319,6 +324,7 @@ class WhatsAppClient {
             };
         } catch (error) {
             console.error('Error sending message:', error);
+            this.recordSendFailure();
             if (this.isBrowserCrashError(error)) {
                 // The Puppeteer execution context is gone — mark not-ready and reconnect
                 this.isReady = false;
@@ -382,6 +388,7 @@ class WhatsAppClient {
             };
         } catch (error) {
             console.error('Error sending media:', error);
+            this.recordSendFailure();
             if (this.isBrowserCrashError(error)) {
                 this.isReady = false;
                 this.scheduleReconnect(3000);
@@ -431,21 +438,42 @@ class WhatsAppClient {
     }
 
     /**
-     * Schedule a session-preserving reconnect attempt.
+     * Schedule a session-preserving reconnect attempt with exponential backoff.
      * Guards against concurrent reconnects with isReconnecting flag.
+     * Backoff: 5s → 10s → 20s → 40s → 60s (capped).
+     * After maxReconnectAttempts, stops trying and notifies the backend.
      */
-    scheduleReconnect(delayMs = 5000) {
+    scheduleReconnect(delayMs) {
         if (this.isReconnecting) {
             console.log(`User ${this.userId}: reconnect already scheduled, skipping`);
             return;
         }
+
+        this.reconnectAttempts++;
+
+        // Check if max attempts exceeded
+        if (this.reconnectAttempts > this.maxReconnectAttempts) {
+            console.error(`User ${this.userId}: max reconnect attempts (${this.maxReconnectAttempts}) exceeded, giving up`);
+            this.stopHeartbeat();
+            // Notify backend that reconnection has permanently failed
+            this.sendWebhook('/whatsapp/reconnect-failed', {
+                userId: this.userId,
+                attempts: this.reconnectAttempts - 1,
+                reason: 'Max reconnect attempts exceeded'
+            });
+            return;
+        }
+
+        // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped)
+        const backoffDelay = delayMs || Math.min(5000 * Math.pow(2, this.reconnectAttempts - 1), 60000);
+
         this.isReconnecting = true;
         // Stop heartbeat timers before reconnecting — they'll restart after ready fires
         this.stopHeartbeat();
-        console.log(`User ${this.userId}: scheduling reconnect in ${delayMs}ms...`);
+        console.log(`User ${this.userId}: scheduling reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${backoffDelay}ms...`);
         setTimeout(async () => {
             try {
-                console.log(`User ${this.userId}: attempting auto-reconnect...`);
+                console.log(`User ${this.userId}: attempting auto-reconnect (attempt ${this.reconnectAttempts})...`);
                 // Destroy the broken browser instance without clearing saved session files
                 if (this.client) {
                     try { await this.client.destroy(); } catch (_) { /* ignore */ }
@@ -462,7 +490,7 @@ class WhatsAppClient {
             } finally {
                 this.isReconnecting = false;
             }
-        }, delayMs);
+        }, backoffDelay);
     }
 
     /**
@@ -474,18 +502,19 @@ class WhatsAppClient {
     startHeartbeat() {
         this.stopHeartbeat(); // clear any stale timers first
 
-        // Check getState() every 2 minutes — catches silent crashes before any user message hits them
-        this.heartbeatInterval = setInterval(() => this.checkHealth(), 2 * 60 * 1000);
+        // Check getState() every 30 seconds — catches silent crashes quickly
+        this.heartbeatInterval = setInterval(() => this.checkHealth(), 30 * 1000);
 
         // Proactively reconnect every 45 minutes — prevents the ~1hr degradation cycle
         this.proactiveReconnectTimer = setTimeout(() => {
             if (!this.isReconnecting) {
                 console.log(`User ${this.userId}: proactive scheduled reconnect to prevent Chromium degradation`);
+                this.reconnectAttempts = 0; // Reset — this is a proactive reconnect, not a failure
                 this.scheduleReconnect(1000);
             }
         }, 45 * 60 * 1000);
 
-        console.log(`User ${this.userId}: heartbeat started (health check every 2m, proactive reconnect in 45m)`);
+        console.log(`User ${this.userId}: heartbeat started (health check every 30s, proactive reconnect in 45m)`);
     }
 
     stopHeartbeat() {
@@ -536,6 +565,33 @@ class WhatsAppClient {
             msg.includes('Protocol error') ||
             msg.includes('Cannot read properties of undefined')
         );
+    }
+
+    /**
+     * Records a send failure timestamp for failure storm detection.
+     * If 5+ failures occur within 10 minutes, forces a reconnect.
+     */
+    recordSendFailure() {
+        const now = Date.now();
+        this.recentSendFailures.push(now);
+        // Keep only failures from the last 10 minutes
+        const tenMinutesAgo = now - 10 * 60 * 1000;
+        this.recentSendFailures = this.recentSendFailures.filter(ts => ts > tenMinutesAgo);
+        this.checkFailureStorm();
+    }
+
+    /**
+     * Detects "failure storms" — when 5+ send attempts fail within 10 minutes
+     * even though the socket reports CONNECTED. This catches the case where
+     * Baileys reports connected but the actual WA session is degraded.
+     */
+    checkFailureStorm() {
+        if (this.recentSendFailures.length >= 5 && !this.isReconnecting) {
+            console.warn(`User ${this.userId}: FAILURE STORM detected (${this.recentSendFailures.length} failures in 10min), forcing reconnect`);
+            this.recentSendFailures = []; // Clear to prevent repeated triggers
+            this.isReady = false;
+            this.scheduleReconnect(2000);
+        }
     }
 
     async disconnect(clearSession = false) {
