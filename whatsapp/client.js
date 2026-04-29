@@ -23,6 +23,7 @@ class WhatsAppClient {
 
     async initialize() {
         console.log(`Initializing WhatsApp client for user ${this.userId}...`);
+        this.initializationError = null;
 
         // Clean up stale Chrome lock files before starting
         await this.cleanupLockFiles();
@@ -49,6 +50,9 @@ class WhatsAppClient {
                     '--disable-renderer-backgrounding',
                     '--disable-backgrounding-occluded-windows',
                     '--disable-hang-monitor',
+                    '--disable-breakpad',
+                    '--disable-crash-reporter',
+                    '--disable-crashpad',
                     // Reduce per-instance memory footprint on constrained VPS
                     '--js-flags=--max-old-space-size=512',
                     '--disable-extensions',
@@ -58,7 +62,9 @@ class WhatsAppClient {
                     '--metrics-recording-only',
                     '--no-default-browser-check',
                     '--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider'
-                ]
+                ],
+                timeout: 60000,
+                protocolTimeout: 60000
             },
             webVersionCache: {
                 type: 'none'
@@ -252,9 +258,17 @@ class WhatsAppClient {
 
         // Don't await - let it initialize in background so we can return quickly
         // The QR code will be sent via webhook when ready
-        this.client.initialize().catch((error) => {
+        this.client.initialize().catch(async (error) => {
             console.error(`Client initialization error for user ${this.userId}:`, error);
             this.initializationError = error.message;
+            this.isReady = false;
+            this.isAuthenticated = false;
+            this.qrCode = null;
+            await this.sendWebhook('/whatsapp/auth-failed', {
+                userId: this.userId,
+                reason: error.message,
+                error: error.message
+            });
         });
 
         // Give it a moment to start
@@ -604,9 +618,9 @@ class WhatsAppClient {
         if (this.client) {
             try {
                 // If clearing session, try to logout first (this clears WhatsApp's session)
-                if (clearSession) {
+                if (clearSession && this.client.pupPage && this.client.pupBrowser) {
                     try {
-                        await this.client.logout();
+                        await this.withTimeout(this.client.logout(), 10000, 'logout timed out');
                         console.log(`Logged out WhatsApp session for user ${this.userId}`);
                     } catch (logoutError) {
                         console.error(`Error during logout for user ${this.userId}:`, logoutError.message);
@@ -616,7 +630,7 @@ class WhatsAppClient {
 
                 // Gracefully destroy the client (closes browser properly)
                 try {
-                    await this.client.destroy();
+                    await this.withTimeout(this.client.destroy(), 15000, 'browser destroy timed out');
                     console.log(`Browser closed for user ${this.userId}`);
                 } catch (destroyError) {
                     console.error(`Error destroying client for user ${this.userId}:`, destroyError.message);
@@ -624,7 +638,7 @@ class WhatsAppClient {
                     // Force kill the browser if destroy fails
                     try {
                         if (this.client.pupBrowser) {
-                            await this.client.pupBrowser.close();
+                            await this.withTimeout(this.client.pupBrowser.close(), 5000, 'browser close timed out');
                             console.log(`Force closed browser for user ${this.userId}`);
                         }
                     } catch (forceCloseError) {
@@ -643,6 +657,20 @@ class WhatsAppClient {
         }
 
         console.log(`Disconnected WhatsApp client for user ${this.userId}`);
+    }
+
+    async withTimeout(promise, timeoutMs, message) {
+        let timeout;
+        try {
+            return await Promise.race([
+                promise,
+                new Promise((_, reject) => {
+                    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+                })
+            ]);
+        } finally {
+            if (timeout) clearTimeout(timeout);
+        }
     }
 
     /**

@@ -2,6 +2,13 @@ const express = require('express');
 const router = express.Router();
 
 module.exports = (sessionManager) => {
+    const busyResponse = (res, error) => res.status(409).json({
+        success: false,
+        status: 'busy',
+        operation: error.operation,
+        error: error.message
+    });
+
     // Initialize WhatsApp for a user
     router.post('/init', async (req, res) => {
         try {
@@ -11,34 +18,34 @@ module.exports = (sessionManager) => {
                 return res.status(400).json({ error: 'userId is required' });
             }
 
-            // Determine if we should clear session files (force implies clearSession)
-            const shouldClearSession = clearSession || force;
+            await sessionManager.runExclusive(userId, 'initializing', async () => {
+                // Determine if we should clear session files (force implies clearSession)
+                const shouldClearSession = clearSession || force;
 
-            // If session exists and force=true, destroy it first
-            if (sessionManager.hasSession(userId)) {
-                if (force) {
-                    console.log(`Force reinitializing session for user ${userId} (clearSession=${shouldClearSession})`);
-                    try {
-                        await sessionManager.destroySession(userId, shouldClearSession);
-                    } catch (err) {
-                        console.error(`Error destroying old session: ${err.message}`);
-                        // Force remove from map if destroy fails
-                        sessionManager.sessions.delete(userId);
+                // If session exists and force=true, destroy it first
+                if (sessionManager.hasSession(userId)) {
+                    if (force) {
+                        console.log(`Force reinitializing session for user ${userId} (clearSession=${shouldClearSession})`);
+                        try {
+                            await sessionManager.destroySession(userId, shouldClearSession);
+                        } catch (err) {
+                            console.error(`Error destroying old session: ${err.message}`);
+                            // Force remove from map if destroy fails
+                            sessionManager.sessions.delete(userId);
+                        }
+                    } else {
+                        const error = new Error('Session already exists for this user');
+                        error.code = 'SESSION_EXISTS';
+                        throw error;
                     }
-                } else {
-                    return res.status(400).json({
-                        error: 'Session already exists for this user',
-                        userId: userId,
-                        hint: 'Use force=true to reinitialize'
-                    });
+                } else if (shouldClearSession) {
+                    // No in-memory session but user wants to clear - clear any leftover files
+                    console.log(`Clearing leftover session files for user ${userId}`);
+                    await sessionManager.destroySession(userId, true);
                 }
-            } else if (shouldClearSession) {
-                // No in-memory session but user wants to clear - clear any leftover files
-                console.log(`Clearing leftover session files for user ${userId}`);
-                await sessionManager.destroySession(userId, true);
-            }
 
-            await sessionManager.createSession(userId);
+                await sessionManager.createSession(userId);
+            });
 
             res.json({
                 success: true,
@@ -47,6 +54,13 @@ module.exports = (sessionManager) => {
             });
         } catch (error) {
             console.error('Error in /init:', error);
+            if (error.code === 'SESSION_BUSY') return busyResponse(res, error);
+            if (error.code === 'SESSION_EXISTS') {
+                return res.status(400).json({
+                    error: error.message,
+                    hint: 'Use force=true to reinitialize'
+                });
+            }
             res.status(500).json({ error: error.message });
         }
     });
@@ -55,33 +69,42 @@ module.exports = (sessionManager) => {
     // This is the user-friendly endpoint for "Generate New QR Code"
     router.post('/reconnect', async (req, res) => {
         try {
-            const { userId } = req.body;
+            const { userId, clearSession } = req.body;
 
             if (!userId) {
                 return res.status(400).json({ error: 'userId is required' });
             }
 
-            console.log(`Reconnecting WhatsApp for user ${userId} - clearing old session and generating new QR`);
+            const shouldClearSession = Boolean(clearSession);
 
-            // Destroy existing session and clear all session files
-            try {
-                await sessionManager.destroySession(userId, true);
-            } catch (err) {
-                console.error(`Error destroying session during reconnect: ${err.message}`);
-                sessionManager.sessions.delete(userId);
-            }
+            await sessionManager.runExclusive(userId, 'reconnecting', async () => {
+                console.log(`Reconnecting WhatsApp for user ${userId} (clearSession=${shouldClearSession})`);
 
-            // Create fresh session
-            await sessionManager.createSession(userId);
+                // Destroy existing browser. Preserve session files by default so recovery
+                // does not force the customer to scan a new QR code.
+                try {
+                    await sessionManager.destroySession(userId, shouldClearSession);
+                } catch (err) {
+                    console.error(`Error destroying session during reconnect: ${err.message}`);
+                    sessionManager.sessions.delete(userId);
+                }
+
+                // Create fresh browser/client using the saved LocalAuth session if present.
+                await sessionManager.createSession(userId);
+            });
 
             res.json({
                 success: true,
-                message: 'WhatsApp reconnection started. A new QR code will be generated.',
+                message: shouldClearSession
+                    ? 'WhatsApp reconnection started. A new QR code will be generated.'
+                    : 'WhatsApp recovery started. Existing session will be reused if still valid.',
                 userId: userId,
-                nextStep: 'Poll /api/qr/{userId} or wait for qr-ready webhook'
+                clearSession: shouldClearSession,
+                nextStep: 'Poll /api/status/{userId} and /api/qr/{userId} as needed'
             });
         } catch (error) {
             console.error('Error in /reconnect:', error);
+            if (error.code === 'SESSION_BUSY') return busyResponse(res, error);
             res.status(500).json({ error: error.message });
         }
     });
@@ -282,7 +305,11 @@ module.exports = (sessionManager) => {
             let actionHint = null;
 
             if (status.exists) {
-                if (status.connected) {
+                if (status.operation) {
+                    statusStr = 'initializing';
+                    action = 'wait';
+                    actionHint = `WhatsApp is currently ${status.operation}. Please wait.`;
+                } else if (status.connected) {
                     statusStr = 'connected';
                 } else if (client && client.initializationError) {
                     statusStr = 'error';
@@ -298,8 +325,14 @@ module.exports = (sessionManager) => {
                     actionHint = 'Wait for QR code, or call POST /api/reconnect to force a new session';
                 }
             } else {
-                action = 'init';
-                actionHint = 'Call POST /api/init with {userId} to start a new session';
+                if (status.operation) {
+                    statusStr = 'initializing';
+                    action = 'wait';
+                    actionHint = `WhatsApp is currently ${status.operation}. Please wait.`;
+                } else {
+                    action = 'init';
+                    actionHint = 'Call POST /api/init with {userId} to start a new session';
+                }
             }
 
             const response = {
@@ -308,7 +341,8 @@ module.exports = (sessionManager) => {
                 connected: status.connected,
                 status: statusStr,
                 action: action,
-                actionHint: actionHint
+                actionHint: actionHint,
+                operation: status.operation || null
             };
 
             // Add error info if there was an initialization error
@@ -343,7 +377,9 @@ module.exports = (sessionManager) => {
                 return res.status(400).json({ error: 'userId is required' });
             }
 
-            await sessionManager.destroySession(userId, clearSession || false);
+            await sessionManager.runExclusive(userId, 'disconnecting', async () => {
+                await sessionManager.destroySession(userId, clearSession || false);
+            });
 
             res.json({
                 success: true,
@@ -353,6 +389,7 @@ module.exports = (sessionManager) => {
             });
         } catch (error) {
             console.error('Error in /disconnect:', error);
+            if (error.code === 'SESSION_BUSY') return busyResponse(res, error);
             res.status(500).json({ error: error.message });
         }
     });

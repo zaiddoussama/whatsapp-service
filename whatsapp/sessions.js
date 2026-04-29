@@ -5,6 +5,7 @@ const path = require('path');
 class SessionManager {
     constructor(springBootUrl) {
         this.sessions = new Map(); // userId -> WhatsAppClient
+        this.operations = new Map(); // userId -> current lifecycle operation
         this.springBootUrl = springBootUrl;
         this.sessionsPath = './storage/sessions';
     }
@@ -71,6 +72,27 @@ class SessionManager {
         return client;
     }
 
+    async runExclusive(userId, operation, fn) {
+        if (this.operations.has(userId)) {
+            const current = this.operations.get(userId);
+            const error = new Error(`WhatsApp session is busy with ${current}`);
+            error.code = 'SESSION_BUSY';
+            error.operation = current;
+            throw error;
+        }
+
+        this.operations.set(userId, operation);
+        try {
+            return await fn();
+        } finally {
+            this.operations.delete(userId);
+        }
+    }
+
+    getOperation(userId) {
+        return this.operations.get(userId) || null;
+    }
+
     getSession(userId) {
         return this.sessions.get(userId);
     }
@@ -98,9 +120,14 @@ class SessionManager {
     getSessionStatus(userId) {
         const client = this.sessions.get(userId);
         if (!client) {
-            return { exists: false, connected: false };
+            return { exists: false, connected: false, operation: this.getOperation(userId) };
         }
-        return { exists: true, connected: client.isReady };
+        return {
+            exists: true,
+            connected: client.isReady,
+            operation: this.getOperation(userId),
+            error: client.initializationError || null
+        };
     }
 }
 
