@@ -8,12 +8,14 @@ const createRoutes = require('./api/routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SPRING_BOOT_URL = process.env.SPRING_BOOT_URL || 'http://localhost:8080/api';
+const WHATSAPP_PROVIDER = (process.env.WHATSAPP_PROVIDER || 'wwebjs').toLowerCase();
 
 console.log('=================================================');
 console.log('   WhatsApp Web.js Service Starting...         ');
 console.log('=================================================');
 console.log(`Port: ${PORT}`);
 console.log(`Spring Boot Webhook URL: ${SPRING_BOOT_URL}`);
+console.log(`Provider: ${WHATSAPP_PROVIDER}`);
 console.log('=================================================\n');
 
 // Middleware
@@ -53,6 +55,7 @@ app.get('/', (req, res) => {
         service: 'WhatsApp Web.js API',
         version: '1.0.0',
         status: 'running',
+        provider: WHATSAPP_PROVIDER,
         endpoints: {
             health: 'GET /api/health',
             init: 'POST /api/init',

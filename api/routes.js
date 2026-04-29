@@ -342,7 +342,8 @@ module.exports = (sessionManager) => {
                 status: statusStr,
                 action: action,
                 actionHint: actionHint,
-                operation: status.operation || null
+                operation: status.operation || null,
+                provider: status.provider
             };
 
             // Add error info if there was an initialization error

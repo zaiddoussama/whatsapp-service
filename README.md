@@ -1,6 +1,7 @@
-# WhatsApp Web.js Service
+# WhatsApp Service
 
-WhatsApp Web API service using whatsapp-web.js for AI Agent integration.
+WhatsApp bridge service for AI Agent integration. It defaults to the existing
+`whatsapp-web.js` provider and can also run the experimental Baileys provider.
 
 ## Features
 
@@ -28,7 +29,11 @@ PORT=3000
 SPRING_BOOT_URL=http://localhost:8080/api
 API_KEY=your-api-key
 WEBHOOK_API_KEY=your-webhook-key
+WHATSAPP_PROVIDER=wwebjs
 ```
+
+Set `WHATSAPP_PROVIDER=baileys` to test the browserless Baileys provider. The
+Baileys package requires Node.js 20+, which matches the production Docker image.
 
 ## Running
 
@@ -113,5 +118,7 @@ All API requests require `X-API-Key` header (except `/api/health`).
 
 - Sessions are stored in `./storage/sessions/`
 - Each user gets a separate WhatsApp session
+- `wwebjs` sessions use `session-user-{userId}` directories
+- `baileys` sessions use `baileys-user-{userId}` directories
 - Messages have 3-8 second delays in bulk sending
 - QR codes expire after 30 seconds

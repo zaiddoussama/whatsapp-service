@@ -1,4 +1,5 @@
 const WhatsAppClient = require('./client');
+const BaileysClient = require('./baileys-client');
 const fs = require('fs');
 const path = require('path');
 
@@ -8,6 +9,14 @@ class SessionManager {
         this.operations = new Map(); // userId -> current lifecycle operation
         this.springBootUrl = springBootUrl;
         this.sessionsPath = './storage/sessions';
+        this.provider = (process.env.WHATSAPP_PROVIDER || 'wwebjs').toLowerCase();
+
+        if (!['wwebjs', 'baileys'].includes(this.provider)) {
+            console.warn(`Unknown WHATSAPP_PROVIDER="${this.provider}". Falling back to wwebjs.`);
+            this.provider = 'wwebjs';
+        }
+
+        console.log(`WhatsApp provider: ${this.provider}`);
     }
 
     /**
@@ -25,12 +34,14 @@ class SessionManager {
                 return;
             }
 
-            // List session directories (format: session-user-{userId})
+            // List session directories for the active provider.
             const entries = fs.readdirSync(this.sessionsPath, { withFileTypes: true });
+            const prefix = this.provider === 'baileys' ? 'baileys-user-' : 'session-user-';
+            const regex = this.provider === 'baileys' ? /baileys-user-(\d+)/ : /session-user-(\d+)/;
             const sessionDirs = entries
-                .filter(entry => entry.isDirectory() && entry.name.startsWith('session-user-'))
+                .filter(entry => entry.isDirectory() && entry.name.startsWith(prefix))
                 .map(entry => {
-                    const match = entry.name.match(/session-user-(\d+)/);
+                    const match = entry.name.match(regex);
                     return match ? parseInt(match[1]) : null;
                 })
                 .filter(userId => userId !== null);
@@ -64,12 +75,19 @@ class SessionManager {
             throw new Error(`Session already exists for user ${userId}`);
         }
 
-        const client = new WhatsAppClient(userId, this.springBootUrl);
+        const client = this.createClient(userId);
         this.sessions.set(userId, client);
 
         await client.initialize();
 
         return client;
+    }
+
+    createClient(userId) {
+        if (this.provider === 'baileys') {
+            return new BaileysClient(userId, this.springBootUrl);
+        }
+        return new WhatsAppClient(userId, this.springBootUrl);
     }
 
     async runExclusive(userId, operation, fn) {
@@ -104,7 +122,7 @@ class SessionManager {
             this.sessions.delete(userId);
         } else if (clearSession) {
             // Even if no in-memory session, try to clear files on disk
-            const tempClient = new WhatsAppClient(userId, this.springBootUrl);
+            const tempClient = this.createClient(userId);
             await tempClient.clearSessionFiles();
         }
     }
@@ -120,13 +138,19 @@ class SessionManager {
     getSessionStatus(userId) {
         const client = this.sessions.get(userId);
         if (!client) {
-            return { exists: false, connected: false, operation: this.getOperation(userId) };
+            return {
+                exists: false,
+                connected: false,
+                operation: this.getOperation(userId),
+                provider: this.provider
+            };
         }
         return {
             exists: true,
             connected: client.isReady,
             operation: this.getOperation(userId),
-            error: client.initializationError || null
+            error: client.initializationError || null,
+            provider: this.provider
         };
     }
 }
