@@ -311,10 +311,18 @@ module.exports = (sessionManager) => {
                     actionHint = `WhatsApp is currently ${status.operation}. Please wait.`;
                 } else if (status.connected) {
                     statusStr = 'connected';
-                } else if (client && client.initializationError) {
-                    statusStr = 'error';
+                } else if (status.connectionState === 'reconnecting' || status.isReconnecting) {
+                    statusStr = 'reconnecting';
+                    action = 'wait';
+                    actionHint = 'WhatsApp is reconnecting automatically. Please wait.';
+                } else if (status.connectionState === 'degraded') {
+                    statusStr = 'degraded';
                     action = 'reconnect';
-                    actionHint = 'Call POST /api/reconnect with {userId} to generate a new QR code';
+                    actionHint = 'WhatsApp session is degraded. Call POST /api/reconnect to recover without clearing the saved session.';
+                } else if (status.connectionState === 'failed' || (client && client.initializationError)) {
+                    statusStr = 'failed';
+                    action = 'reconnect';
+                    actionHint = 'Call POST /api/reconnect with {userId}. Use clearSession=true only if recovery fails or the session is logged out.';
                 } else if (client && client.qrCode) {
                     statusStr = 'waiting_scan';
                     action = 'scan_qr';
@@ -343,7 +351,23 @@ module.exports = (sessionManager) => {
                 action: action,
                 actionHint: actionHint,
                 operation: status.operation || null,
-                provider: status.provider
+                provider: status.provider,
+                providerVersion: status.providerVersion || null,
+                connectionState: status.connectionState || statusStr,
+                sessionAgeSeconds: status.sessionAgeSeconds || 0,
+                createdAt: status.createdAt || null,
+                lastReadyAt: status.lastReadyAt || null,
+                lastQrAt: status.lastQrAt || null,
+                lastDisconnectedAt: status.lastDisconnectedAt || null,
+                lastError: status.lastError || status.error || null,
+                degradedReason: status.degradedReason || null,
+                lastInboundAt: status.lastInboundAt || null,
+                lastOutboundAt: status.lastOutboundAt || null,
+                lastAckAt: status.lastAckAt || null,
+                lastAckStatus: status.lastAckStatus || null,
+                reconnectCount: status.reconnectCount || status.reconnectAttempts || 0,
+                reconnectAttempts: status.reconnectAttempts || 0,
+                isReconnecting: Boolean(status.isReconnecting)
             };
 
             // Add error info if there was an initialization error
@@ -355,6 +379,12 @@ module.exports = (sessionManager) => {
             if (client && client.isReady && client.client && client.client.info) {
                 response.phoneNumber = client.client.info.wid.user;
                 response.platform = client.client.info.platform;
+            }
+            if (status.phoneNumber) {
+                response.phoneNumber = status.phoneNumber;
+            }
+            if (status.platform) {
+                response.platform = status.platform;
             }
 
             // Add QR code if available and not connected
@@ -411,9 +441,15 @@ module.exports = (sessionManager) => {
 
         res.json({
             status: 'ok',
-            service: 'whatsapp-web.js',
+            service: 'whatsapp-service',
+            provider: sessionManager.provider,
+            providerVersion: sessionManager.providerVersion,
             activeSessions: activeSessions.length,
-            sessions: activeSessions
+            sessions: activeSessions,
+            sessionStatuses: activeSessions.map(userId => ({
+                userId,
+                ...sessionManager.getSessionStatus(userId)
+            }))
         });
     });
 

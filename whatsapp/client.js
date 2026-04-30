@@ -19,11 +19,22 @@ class WhatsAppClient {
         this.heartbeatInterval = null;       // Periodic health check timer
         this.proactiveReconnectTimer = null; // Proactive reconnect to prevent ~1hr degradation
         this.recentSendFailures = [];  // Timestamps of recent send failures for storm detection
+        this.provider = 'wwebjs';
+        this.createdAt = new Date().toISOString();
+        this.lastReadyAt = null;
+        this.lastQrAt = null;
+        this.lastDisconnectedAt = null;
+        this.lastError = null;
+        this.lastInboundAt = null;
+        this.lastOutboundAt = null;
+        this.connectionState = 'new';
     }
 
     async initialize() {
         console.log(`Initializing WhatsApp client for user ${this.userId}...`);
         this.initializationError = null;
+        this.lastError = null;
+        this.connectionState = 'initializing';
 
         // Clean up stale Chrome lock files before starting
         await this.cleanupLockFiles();
@@ -77,6 +88,8 @@ class WhatsAppClient {
             this.qrCode = qr;
             this.isReady = false; // Reset ready state when new QR is generated
             this.isAuthenticated = false; // Reset authenticated state for new QR
+            this.lastQrAt = new Date().toISOString();
+            this.connectionState = 'waiting_scan';
 
             // Generate QR code image as base64
             const qrImage = await qrcode.toDataURL(qr);
@@ -145,6 +158,9 @@ class WhatsAppClient {
             this.qrCode = null;
             this.reconnectAttempts = 0; // Reset on successful connection
             this.recentSendFailures = []; // Clear failure history on fresh connection
+            this.lastReadyAt = new Date().toISOString();
+            this.lastError = null;
+            this.connectionState = 'connected';
 
             const info = this.client.info;
             console.log(`User ${this.userId} connected with phone: ${info?.wid?.user}, platform: ${info?.platform}`);
@@ -163,6 +179,7 @@ class WhatsAppClient {
         // Incoming message event - forward to Spring Boot
         this.client.on('message', async (message) => {
             console.log(`Message received from ${message.from}`);
+            this.lastInboundAt = new Date().toISOString();
 
             // Send typing indicator — best effort, never block message processing
             try {
@@ -230,6 +247,9 @@ class WhatsAppClient {
             console.log(`WhatsApp disconnected for user ${this.userId}: ${reason}`);
             this.isReady = false;
             this.isAuthenticated = false;
+            this.lastDisconnectedAt = new Date().toISOString();
+            this.lastError = reason;
+            this.connectionState = 'degraded';
 
             await this.sendWebhook('/whatsapp/disconnected', {
                 userId: this.userId,
@@ -246,6 +266,8 @@ class WhatsAppClient {
         this.client.on('auth_failure', async (error) => {
             console.error(`Auth failure for user ${this.userId}:`, error);
             this.initializationError = error.message;
+            this.lastError = error.message;
+            this.connectionState = 'failed';
 
             await this.sendWebhook('/whatsapp/auth-failed', {
                 userId: this.userId,
@@ -261,6 +283,8 @@ class WhatsAppClient {
         this.client.initialize().catch(async (error) => {
             console.error(`Client initialization error for user ${this.userId}:`, error);
             this.initializationError = error.message;
+            this.lastError = error.message;
+            this.connectionState = 'failed';
             this.isReady = false;
             this.isAuthenticated = false;
             this.qrCode = null;
@@ -317,6 +341,8 @@ class WhatsAppClient {
                         // Browser/page has crashed — mark as not ready and reconnect
                         console.error(`User ${this.userId}: Browser crash detected in getNumberId, triggering reconnect:`, lookupErr.message);
                         this.isReady = false;
+                        this.connectionState = 'degraded';
+                        this.lastError = lookupErr.message;
                         this.scheduleReconnect(3000);
                         throw new Error('WhatsApp service is temporarily unavailable, reconnecting...');
                     }
@@ -330,6 +356,7 @@ class WhatsAppClient {
             const sentMessage = await this.client.sendMessage(chatId, message, {
                 sendSeen: false
             });
+            this.lastOutboundAt = new Date().toISOString();
 
             return {
                 success: true,
@@ -338,10 +365,12 @@ class WhatsAppClient {
             };
         } catch (error) {
             console.error('Error sending message:', error);
+            this.lastError = error.message;
             this.recordSendFailure();
             if (this.isBrowserCrashError(error)) {
                 // The Puppeteer execution context is gone — mark not-ready and reconnect
                 this.isReady = false;
+                this.connectionState = 'degraded';
                 this.scheduleReconnect(3000);
             }
             throw error;
@@ -394,6 +423,7 @@ class WhatsAppClient {
                 caption: caption,
                 sendSeen: false
             });
+            this.lastOutboundAt = new Date().toISOString();
 
             return {
                 success: true,
@@ -402,9 +432,11 @@ class WhatsAppClient {
             };
         } catch (error) {
             console.error('Error sending media:', error);
+            this.lastError = error.message;
             this.recordSendFailure();
             if (this.isBrowserCrashError(error)) {
                 this.isReady = false;
+                this.connectionState = 'degraded';
                 this.scheduleReconnect(3000);
             }
             throw error;
@@ -475,6 +507,8 @@ class WhatsAppClient {
                 attempts: this.reconnectAttempts - 1,
                 reason: 'Max reconnect attempts exceeded'
             });
+            this.lastError = 'Max reconnect attempts exceeded';
+            this.connectionState = 'failed';
             return;
         }
 
@@ -482,6 +516,7 @@ class WhatsAppClient {
         const backoffDelay = delayMs || Math.min(5000 * Math.pow(2, this.reconnectAttempts - 1), 60000);
 
         this.isReconnecting = true;
+        this.connectionState = 'reconnecting';
         // Stop heartbeat timers before reconnecting — they'll restart after ready fires
         this.stopHeartbeat();
         console.log(`User ${this.userId}: scheduling reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${backoffDelay}ms...`);
@@ -496,6 +531,7 @@ class WhatsAppClient {
                 this.isReady = false;
                 this.isAuthenticated = false;
                 this.qrCode = null;
+                this.connectionState = 'initializing';
                 // Re-initialize — LocalAuth will restore the saved session automatically
                 await this.initialize();
                 console.log(`User ${this.userId}: auto-reconnect initialization triggered`);
@@ -604,6 +640,8 @@ class WhatsAppClient {
             console.warn(`User ${this.userId}: FAILURE STORM detected (${this.recentSendFailures.length} failures in 10min), forcing reconnect`);
             this.recentSendFailures = []; // Clear to prevent repeated triggers
             this.isReady = false;
+            this.connectionState = 'degraded';
+            this.lastError = 'Multiple send failures detected. Recovering session.';
             this.scheduleReconnect(2000);
         }
     }
@@ -613,6 +651,8 @@ class WhatsAppClient {
         this.isReady = false;
         this.qrCode = null;
         this.initializationError = null;
+        this.connectionState = 'disconnected';
+        this.lastDisconnectedAt = new Date().toISOString();
         this.stopHeartbeat();
 
         if (this.client) {
@@ -751,6 +791,30 @@ class WhatsAppClient {
      */
     getSessionPath() {
         return path.join('./storage/sessions', `session-user-${this.userId}`);
+    }
+
+    getStatusMetadata() {
+        const info = this.client?.info;
+        const sessionAgeSeconds = Math.max(0, Math.floor((Date.now() - new Date(this.createdAt).getTime()) / 1000));
+        const degradedReason = ['degraded', 'failed'].includes(this.connectionState) ? this.lastError : null;
+        return {
+            provider: this.provider,
+            connectionState: this.connectionState,
+            sessionAgeSeconds,
+            createdAt: this.createdAt,
+            lastReadyAt: this.lastReadyAt,
+            lastQrAt: this.lastQrAt,
+            lastDisconnectedAt: this.lastDisconnectedAt,
+            lastError: this.lastError,
+            lastInboundAt: this.lastInboundAt,
+            lastOutboundAt: this.lastOutboundAt,
+            reconnectCount: this.reconnectAttempts,
+            reconnectAttempts: this.reconnectAttempts,
+            degradedReason,
+            isReconnecting: this.isReconnecting,
+            phoneNumber: info?.wid?.user,
+            platform: info?.platform || 'wwebjs'
+        };
     }
 
     async sendWebhook(endpoint, data) {

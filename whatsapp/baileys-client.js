@@ -5,6 +5,20 @@ const path = require('path');
 
 let baileysModulePromise;
 let pinoModulePromise;
+let baileysNoiseSuppressed = false;
+
+function suppressBaileysSessionNoise() {
+    if (baileysNoiseSuppressed || process.env.SUPPRESS_BAILEYS_SESSION_LOGS === 'false') {
+        return;
+    }
+
+    const originalInfo = console.info.bind(console);
+    console.info = (...args) => {
+        if (args[0] === 'Closing session:') return;
+        originalInfo(...args);
+    };
+    baileysNoiseSuppressed = true;
+}
 
 async function loadBaileys() {
     if (!baileysModulePromise) {
@@ -36,12 +50,25 @@ class BaileysClient {
         this.authSaveHandler = null;
         this.baileys = null;
         this.heartbeatInterval = null;
+        this.provider = 'baileys';
+        this.createdAt = new Date().toISOString();
+        this.lastReadyAt = null;
+        this.lastQrAt = null;
+        this.lastDisconnectedAt = null;
+        this.lastError = null;
+        this.lastInboundAt = null;
+        this.lastOutboundAt = null;
+        this.lastAckAt = null;
+        this.lastAckStatus = null;
+        this.connectionState = 'new';
     }
 
     async initialize() {
+        suppressBaileysSessionNoise();
         console.log(`Initializing Baileys client for user ${this.userId}...`);
         this.initializationError = null;
         this.intentionalDisconnect = false;
+        this.connectionState = 'initializing';
 
         const baileys = await loadBaileys();
         const pinoModule = await loadPino();
@@ -78,6 +105,8 @@ class BaileysClient {
                 this.qrCode = qr;
                 this.isReady = false;
                 this.isAuthenticated = false;
+                this.lastQrAt = new Date().toISOString();
+                this.connectionState = 'waiting_scan';
 
                 const qrImage = await qrcode.toDataURL(qr);
                 await this.sendWebhook('/whatsapp/qr-ready', {
@@ -93,6 +122,9 @@ class BaileysClient {
                 this.isAuthenticated = true;
                 this.qrCode = null;
                 this.reconnectAttempts = 0;
+                this.lastReadyAt = new Date().toISOString();
+                this.lastError = null;
+                this.connectionState = 'connected';
 
                 const phoneNumber = this.getOwnPhoneNumber();
                 await this.sendWebhook('/whatsapp/connected', {
@@ -111,6 +143,9 @@ class BaileysClient {
                 this.isReady = false;
                 this.isAuthenticated = false;
                 this.stopHeartbeat();
+                this.lastDisconnectedAt = new Date().toISOString();
+                this.lastError = reason;
+                this.connectionState = this.intentionalDisconnect ? 'disconnected' : 'degraded';
 
                 if (this.intentionalDisconnect) {
                     console.log(`Baileys intentionally disconnected for user ${this.userId}`);
@@ -141,6 +176,12 @@ class BaileysClient {
             if (type !== 'notify') return;
             for (const message of messages) {
                 await this.handleIncomingMessage(message);
+            }
+        });
+
+        this.sock.ev.on('messages.update', (updates) => {
+            for (const update of updates) {
+                this.handleMessageUpdate(update);
             }
         });
     }
@@ -190,8 +231,24 @@ class BaileysClient {
             }
 
             await this.sendWebhook('/whatsapp/message-received', messageData);
+            await this.markAsRead(message.key);
+            this.lastInboundAt = new Date().toISOString();
         } catch (error) {
             console.error(`Error handling Baileys incoming message for user ${this.userId}:`, error);
+        }
+    }
+
+    handleMessageUpdate(update) {
+        const status = update?.update?.status;
+        if (status === undefined || status === null) return;
+
+        const mappedStatus = this.mapAckStatus(status);
+        this.lastAckAt = new Date().toISOString();
+        this.lastAckStatus = mappedStatus;
+
+        const messageId = update?.key?.id;
+        if (messageId) {
+            console.log(`Baileys message status for user ${this.userId}: ${messageId} -> ${mappedStatus}`);
         }
     }
 
@@ -200,9 +257,18 @@ class BaileysClient {
             throw new Error('WhatsApp client is not ready');
         }
 
-        const chatId = await this.formatChatId(to);
-        if (chatId && chatId.success === false) return chatId;
-        const sentMessage = await this.sock.sendMessage(chatId, { text: message });
+        let sentMessage;
+        try {
+            const chatId = await this.formatChatId(to);
+            if (chatId && chatId.success === false) return chatId;
+            sentMessage = await this.sock.sendMessage(chatId, { text: message });
+            this.lastOutboundAt = new Date().toISOString();
+            this.lastError = null;
+        } catch (error) {
+            this.lastError = error.message;
+            this.connectionState = 'degraded';
+            throw error;
+        }
 
         return {
             success: true,
@@ -216,18 +282,27 @@ class BaileysClient {
             throw new Error('WhatsApp client is not ready');
         }
 
-        const chatId = await this.formatChatId(to);
-        if (chatId && chatId.success === false) return chatId;
-        const response = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
-        const mimetype = response.headers['content-type'] || 'application/octet-stream';
-        const buffer = Buffer.from(response.data);
+        let sentMessage;
+        try {
+            const chatId = await this.formatChatId(to);
+            if (chatId && chatId.success === false) return chatId;
+            const response = await axios.get(mediaUrl, { responseType: 'arraybuffer' });
+            const mimetype = response.headers['content-type'] || 'application/octet-stream';
+            const buffer = Buffer.from(response.data);
 
-        const sentMessage = await this.sock.sendMessage(chatId, {
-            document: buffer,
-            mimetype,
-            fileName: 'media-file',
-            caption
-        });
+            sentMessage = await this.sock.sendMessage(chatId, {
+                document: buffer,
+                mimetype,
+                fileName: 'media-file',
+                caption
+            });
+            this.lastOutboundAt = new Date().toISOString();
+            this.lastError = null;
+        } catch (error) {
+            this.lastError = error.message;
+            this.connectionState = 'degraded';
+            throw error;
+        }
 
         return {
             success: true,
@@ -261,8 +336,13 @@ class BaileysClient {
         } catch (_) { /* typing is cosmetic */ }
     }
 
-    markAsRead() {
-        // Not needed for the current backend contract.
+    async markAsRead(messageKey) {
+        if (!this.isReady || !this.sock || !messageKey?.remoteJid || !messageKey?.id) return;
+        try {
+            await this.sock.readMessages([messageKey]);
+        } catch (error) {
+            console.warn(`Baileys markAsRead failed for user ${this.userId}:`, error.message);
+        }
     }
 
     scheduleReconnect(delayMs) {
@@ -284,6 +364,7 @@ class BaileysClient {
 
         const backoffDelay = delayMs || Math.min(5000 * Math.pow(2, this.reconnectAttempts - 1), 60000);
         this.isReconnecting = true;
+        this.connectionState = 'reconnecting';
 
         setTimeout(async () => {
             try {
@@ -347,6 +428,7 @@ class BaileysClient {
         try {
             this.sock.ev.removeAllListeners('connection.update');
             this.sock.ev.removeAllListeners('messages.upsert');
+            this.sock.ev.removeAllListeners('messages.update');
             this.sock.ev.removeAllListeners('creds.update');
             this.sock.end?.(undefined);
             this.sock.ws?.close?.();
@@ -415,6 +497,31 @@ class BaileysClient {
         return jid;
     }
 
+    getStatusMetadata() {
+        const sessionAgeSeconds = Math.max(0, Math.floor((Date.now() - new Date(this.createdAt).getTime()) / 1000));
+        const degradedReason = ['degraded', 'failed'].includes(this.connectionState) ? this.lastError : null;
+        return {
+            provider: this.provider,
+            connectionState: this.connectionState,
+            sessionAgeSeconds,
+            createdAt: this.createdAt,
+            lastReadyAt: this.lastReadyAt,
+            lastQrAt: this.lastQrAt,
+            lastDisconnectedAt: this.lastDisconnectedAt,
+            lastError: this.lastError,
+            lastInboundAt: this.lastInboundAt,
+            lastOutboundAt: this.lastOutboundAt,
+            lastAckAt: this.lastAckAt,
+            lastAckStatus: this.lastAckStatus,
+            reconnectCount: this.reconnectAttempts,
+            reconnectAttempts: this.reconnectAttempts,
+            degradedReason,
+            isReconnecting: this.isReconnecting,
+            phoneNumber: this.getOwnPhoneNumber(),
+            platform: 'baileys'
+        };
+    }
+
     getOwnPhoneNumber() {
         const jid = this.sock?.user?.id;
         if (!jid) return undefined;
@@ -474,6 +581,32 @@ class BaileysClient {
 
     isMediaType(messageType) {
         return ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage', 'stickerMessage'].includes(messageType);
+    }
+
+    mapAckStatus(status) {
+        const statuses = this.baileys?.WAMessageStatus || {};
+        switch (status) {
+            case statuses.ERROR:
+            case 0:
+                return 'failed';
+            case statuses.PENDING:
+            case 1:
+                return 'pending';
+            case statuses.SERVER_ACK:
+            case 2:
+                return 'sent';
+            case statuses.DELIVERY_ACK:
+            case 3:
+                return 'delivered';
+            case statuses.READ:
+            case 4:
+                return 'read';
+            case statuses.PLAYED:
+            case 5:
+                return 'played';
+            default:
+                return String(status);
+        }
     }
 
     async withTimeout(promise, timeoutMs, message) {

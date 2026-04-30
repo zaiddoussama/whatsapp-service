@@ -2,6 +2,7 @@ const WhatsAppClient = require('./client');
 const BaileysClient = require('./baileys-client');
 const fs = require('fs');
 const path = require('path');
+const packageJson = require('../package.json');
 
 class SessionManager {
     constructor(springBootUrl) {
@@ -15,8 +16,14 @@ class SessionManager {
             console.warn(`Unknown WHATSAPP_PROVIDER="${this.provider}". Falling back to wwebjs.`);
             this.provider = 'wwebjs';
         }
+        this.providerVersion = this.getProviderVersion();
 
         console.log(`WhatsApp provider: ${this.provider}`);
+    }
+
+    getProviderVersion() {
+        const dependencyName = this.provider === 'baileys' ? 'baileys' : 'whatsapp-web.js';
+        return packageJson.dependencies?.[dependencyName] || 'unknown';
     }
 
     /**
@@ -142,15 +149,23 @@ class SessionManager {
                 exists: false,
                 connected: false,
                 operation: this.getOperation(userId),
-                provider: this.provider
+                provider: this.provider,
+                providerVersion: this.providerVersion,
+                connectionState: this.getOperation(userId) ? 'busy' : 'no_session'
             };
         }
+        const metadata = typeof client.getStatusMetadata === 'function'
+            ? client.getStatusMetadata()
+            : {};
         return {
             exists: true,
             connected: client.isReady,
             operation: this.getOperation(userId),
             error: client.initializationError || null,
-            provider: this.provider
+            provider: this.provider,
+            providerVersion: this.providerVersion,
+            connectionState: metadata.connectionState || (client.isReady ? 'connected' : 'initializing'),
+            ...metadata
         };
     }
 }
